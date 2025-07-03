@@ -1,0 +1,11 @@
+.{
+    .name = .duz,
+    .fingerprint = 0x5207af7f4ec5b1d3,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.14.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
