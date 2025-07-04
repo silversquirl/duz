@@ -154,7 +154,7 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result) !void {
     defer t.arenas[thread_id] = arena.state;
 
     const path = std.mem.span(result.path);
-    var dir = try t.root.openDir(path, .{ .iterate = true });
+    var dir = try t.root.openDirZ(path, .{ .iterate = true });
     defer dir.close();
 
     var count: u31 = 0;
