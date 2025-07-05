@@ -8,11 +8,25 @@ root: std.fs.Dir,
 
 uring: linux.IoUring,
 stat_bufs: Store(u28, linux.Statx),
+// overflow_queue: std.ArrayListUnmanaged(
 outstanding_tasks: u32,
 
 output: std.ArrayListUnmanaged(Result),
 
 pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !IoUringTraverser {
+    // Increase FD limit
+    // TODO: gracefully handle running out of FDs
+    {
+        var limit = try std.posix.getrlimit(.NOFILE);
+        if (limit.cur < limit.max) {
+            std.log.debug("raising FD limit from {} to {}", .{ limit.cur, limit.max });
+            limit.cur = limit.max;
+            std.posix.setrlimit(.NOFILE, limit) catch |err| {
+                std.log.warn("failed to raise file descriptor limit: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
     return .{
         .gpa = general_purpose_alloc,
         .arena = .{},
@@ -29,23 +43,24 @@ pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !IoUring
 pub fn deinit(t: *IoUringTraverser) void {
     t.output.deinit(t.gpa);
     t.uring.deinit();
+    t.stat_bufs.deinit(t.gpa);
     var arena = t.arena.promote(t.gpa);
     arena.deinit();
 }
 
 pub fn run(t: *IoUringTraverser) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     t.output.clearRetainingCapacity();
 
     try t.output.append(t.gpa, .{
         .parent = 0,
         .path = ".",
-        .incomplete_children = undefined,
+        .state = .pack(.uninitialized_directory),
     });
 
-    _ = try t.uring.nop(@bitCast(TaskData{
-        .id = 0,
-        .kind = .begin_dir,
-    }));
+    try t.schedule(.{ .process_dir = 0 });
     t.outstanding_tasks += try t.uring.submit();
 
     while (t.outstanding_tasks > 0) {
@@ -54,12 +69,11 @@ pub fn run(t: *IoUringTraverser) !void {
         t.outstanding_tasks -= count;
 
         for (cqes[0..count]) |cqe| {
-            const data: TaskData = @bitCast(cqe.user_data);
-            switch (data.kind) {
-                .nop => {},
+            const data: Task.IoData = @bitCast(cqe.user_data);
+            (switch (data.task) {
+                .process_file => t.processFile(data, cqe),
 
-                .begin_dir => try t.processDir(data.id),
-                .callback_dir => try t.processDirPart2(data, cqe),
+                .process_dir => t.processDir(data, cqe),
                 .finalize_dir => if (data.id == 0) {
                     // The root is complete
                     break;
@@ -67,49 +81,86 @@ pub fn run(t: *IoUringTraverser) !void {
                     try t.finishItem(data.id);
                 },
 
-                .begin_file => try t.processFile(data.id),
-                .callback_file => try t.processFilePart2(data, cqe),
-            }
+                .close_fd => {}, // No callback required
+            }) catch |err| {
+                const result = &t.output.items[data.id];
+                result.state = .pack(.{ .errored = err });
+                if (data.id != 0) {
+                    try t.finishItem(data.id);
+                }
+            };
         }
         t.outstanding_tasks += try t.uring.submit();
     }
 }
 
-const TaskData = packed struct(u64) {
-    id: u32,
-    kind: enum(u4) {
-        /// Use this for CQEs that don't need handling, such as `close`.
-        nop,
-
-        begin_dir,
-        callback_dir,
-        finalize_dir,
-
-        begin_file,
-        callback_file,
-    },
-    stat_buf: u28 = 0,
-};
-
-fn processFile(t: *IoUringTraverser, id: u32) !void {
-    const stat_buf = try t.stat_bufs.add(t.gpa);
-    errdefer t.stat_bufs.del(stat_buf);
+fn schedule(t: *IoUringTraverser, task: Task) !void {
+    // TODO
+    try t.scheduleImmediately(task);
+}
+fn scheduleImmediately(t: *IoUringTraverser, task: Task) !void {
+    const iodata: Task.IoData = .{
+        .task = task,
+        .id = switch (task) {
+            .process_file, .process_dir, .finalize_dir => |id| id,
+            .close_fd => 0,
+        },
+        .stat_buf = switch (task) {
+            .process_file => try t.stat_bufs.add(t.gpa),
+            else => 0,
+        },
+    };
+    errdefer switch (task) {
+        .process_file => t.stat_bufs.del(iodata.stat_buf),
+        else => {},
+    };
 
     const sqe = try t.uring.get_sqe();
-    sqe.prep_statx(
-        t.root.fd,
-        t.output.items[id].path,
-        linux.AT.SYMLINK_NOFOLLOW | linux.AT.STATX_DONT_SYNC,
-        linux.STATX_SIZE,
-        t.stat_bufs.get(stat_buf),
-    );
-    sqe.user_data = @bitCast(TaskData{
-        .id = id,
-        .kind = .callback_file,
-        .stat_buf = stat_buf,
-    });
+    errdefer comptime unreachable;
+
+    switch (task) {
+        .process_file => |id| sqe.prep_statx(
+            t.root.fd,
+            t.output.items[id].path,
+            linux.AT.SYMLINK_NOFOLLOW | linux.AT.STATX_DONT_SYNC,
+            linux.STATX_SIZE,
+            t.stat_bufs.get(iodata.stat_buf),
+        ),
+
+        .process_dir => |id| sqe.prep_openat(
+            t.root.fd,
+            t.output.items[id].path,
+            .{
+                .ACCMODE = .RDONLY,
+                .NOFOLLOW = true,
+                .DIRECTORY = true,
+                .CLOEXEC = true,
+            },
+            0,
+        ),
+
+        .finalize_dir => sqe.prep_nop(),
+
+        .close_fd => |fd| sqe.prep_close(fd),
+    }
+
+    sqe.user_data = @bitCast(iodata);
 }
-fn processFilePart2(t: *IoUringTraverser, data: TaskData, cqe: linux.io_uring_cqe) !void {
+
+const Task = union(enum(u4)) {
+    process_file: u32,
+    process_dir: u32,
+    finalize_dir: u32,
+    close_fd: linux.fd_t,
+
+    const IoData = packed struct(u64) {
+        id: u32,
+        task: @typeInfo(Task).@"union".tag_type.?,
+        stat_buf: u28 = 0,
+    };
+};
+
+fn processFile(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) !void {
     defer t.stat_bufs.del(data.stat_buf);
 
     switch (cqe.err()) {
@@ -126,25 +177,14 @@ fn processFilePart2(t: *IoUringTraverser, data: TaskData, cqe: linux.io_uring_cq
         else => |err| return std.posix.unexpectedErrno(err),
     }
 
-    t.output.items[data.id].size = t.stat_bufs.get(data.stat_buf).size;
+    const result = &t.output.items[data.id];
+    std.debug.assert(result.state.unpack() == .incomplete_file);
+    result.size = t.stat_bufs.get(data.stat_buf).size;
+    result.state = .pack(.completed_file);
     try t.finishItem(data.id);
 }
 
-fn processDir(t: *IoUringTraverser, id: u32) !void {
-    _ = try t.uring.openat(
-        @bitCast(TaskData{ .id = id, .kind = .callback_dir }),
-        t.root.fd,
-        t.output.items[id].path,
-        .{
-            .ACCMODE = .RDONLY,
-            .NOFOLLOW = true,
-            .DIRECTORY = true,
-            .CLOEXEC = true,
-        },
-        0,
-    );
-}
-fn processDirPart2(t: *IoUringTraverser, data: TaskData, cqe: linux.io_uring_cqe) !void {
+fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
 
@@ -174,7 +214,7 @@ fn processDirPart2(t: *IoUringTraverser, data: TaskData, cqe: linux.io_uring_cqe
     }
 
     const fd: linux.fd_t = cqe.res;
-    defer _ = t.uring.close(@bitCast(TaskData{ .id = data.id, .kind = .nop }), fd) catch {
+    defer t.scheduleImmediately(.{ .close_fd = fd }) catch {
         // async close failed, fallback to synchronous
         std.posix.close(fd);
     };
@@ -194,31 +234,32 @@ fn processDirPart2(t: *IoUringTraverser, data: TaskData, cqe: linux.io_uring_cqe
             entry.name,
         });
 
-        const child = t.output.items.len;
+        const child: u32 = @intCast(t.output.items.len);
         try t.output.append(t.gpa, .{
             .parent = data.id,
             .path = child_path,
-            .incomplete_children = undefined,
+            .state = .pack(switch (entry.kind) {
+                .directory => .uninitialized_directory,
+                else => .incomplete_file,
+            }),
         });
-        count += 1;
 
-        _ = try t.uring.nop(@bitCast(TaskData{
-            .id = @intCast(child),
-            .kind = switch (entry.kind) {
-                .directory => .begin_dir,
-                else => .begin_file,
-            },
-        }));
+        if (t.schedule(switch (entry.kind) {
+            .directory => .{ .process_dir = child },
+            else => .{ .process_file = child },
+        })) |_| {
+            count += 1;
+        } else |err| {
+            const result = &t.output.items[child];
+            result.state = .pack(.{ .errored = err });
+        }
     }
 
     // Set actual child count
-    t.output.items[data.id].incomplete_children = count;
+    t.output.items[data.id].state = .pack(.{ .incomplete_directory = count });
     if (count == 0) {
         // No children; finalize right away
-        _ = try t.uring.nop(@bitCast(TaskData{
-            .id = data.id,
-            .kind = .finalize_dir,
-        }));
+        try t.schedule(.{ .finalize_dir = data.id });
     }
 }
 
@@ -228,24 +269,20 @@ fn finishItem(t: *IoUringTraverser, id: u32) !void {
     const parent_result = &t.output.items[result.parent];
     parent_result.size += result.size;
 
-    parent_result.incomplete_children -= 1;
-    std.debug.assert(result.incomplete_children >= 0);
-    if (parent_result.incomplete_children == 0) {
+    if (parent_result.state.directory.not_a_directory) {
+        std.log.warn("{s} -> {s} {}", .{ result.path, parent_result.path, parent_result.state.unpack() });
+    } else {
+        parent_result.state.finishChildren(1);
+    }
+    if (parent_result.state.unpack() == .completed_directory) {
         // All children completed
-        _ = try t.uring.nop(@bitCast(TaskData{
-            .id = result.parent,
-            .kind = .finalize_dir,
-        }));
+        // TODO: just do a synchronous loop here instead of scheduling
+        try t.schedule(.{ .finalize_dir = result.parent });
     }
 }
 
-pub const Result = struct {
-    parent: u32,
-    path: [*:0]const u8,
-    size: u64 = 0,
-    incomplete_children: u32,
-};
-
 const std = @import("std");
+const tracy = @import("tracy");
 const linux = std.os.linux;
 const Store = @import("store.zig").Store;
+const Result = @import("Result.zig");

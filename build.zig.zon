@@ -2,6 +2,12 @@
     .name = .duz,
     .fingerprint = 0x5207af7f4ec5b1d3,
     .version = "0.0.0",
+    .dependencies = .{
+        .tracy = .{
+            .url = "git+https://github.com/silversquirl/zig-tracy#1abc521694538ff5ad87ee1860065130e832e528",
+            .hash = "tracy-0.11.1-ta-nfs8-AADsgQiwf7v1dtR1Ka1z6A9M7EMPzQUArxHQ",
+        },
+    },
     .minimum_zig_version = "0.14.1",
     .paths = .{
         "build.zig",

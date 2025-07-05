@@ -13,6 +13,10 @@ pub fn Queue(comptime T: type) type {
         const Self = @This();
         pub const empty: Self = .{ .array = .empty };
 
+        pub fn deinit(q: *Queue(T), gpa: std.mem.Allocator) void {
+            q.array.deinit(gpa);
+        }
+
         pub fn close(q: *Queue(T)) void {
             q.lock.lock();
             defer q.lock.unlock();
