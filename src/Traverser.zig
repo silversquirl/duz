@@ -238,19 +238,20 @@ fn finishItem(t: *Traverser, id: u32, result: *Result.ThreadSafe, size: u64) voi
         const parent_id = result.parent;
         const parent_result = t.output.getPtr(parent_id).?;
         _ = parent_result.size.fetchAdd(size, .monotonic);
-        t.finishChildren(parent_id, parent_result, 1);
+        @call(.always_tail, finishChildren, .{ t, parent_id, parent_result, 1 });
     }
 }
 
-fn finishChildren(t: *Traverser, id: u32, result: *Result.ThreadSafe, count: u31) void {
+// Takes a u64 to match the signature of finishItem, for tail calling reasons
+fn finishChildren(t: *Traverser, id: u32, result: *Result.ThreadSafe, count: u64) void {
     const tr = tracy.trace(@src());
     defer tr.end();
 
-    const new = result.state.finishChildren(count, .acq_rel).unpack();
+    const new = result.state.finishChildren(@intCast(count), .acq_rel).unpack();
     if (new == .completed_directory) {
         // All children completed
         // TODO: avoid recursion
-        t.finishItem(id, result, result.size.load(.monotonic));
+        @call(.always_tail, finishItem, .{ t, id, result, result.size.load(.monotonic) });
     }
 }
 
