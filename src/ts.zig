@@ -25,6 +25,9 @@ pub fn Queue(comptime T: type) type {
         }
 
         pub fn push(q: *Queue(T), allocator: std.mem.Allocator, item: T) !void {
+            const tr = tracy.trace(@src());
+            defer tr.end();
+
             q.lock.lock();
             defer q.lock.unlock();
             try q.array.append(allocator, item);
@@ -32,6 +35,9 @@ pub fn Queue(comptime T: type) type {
         }
 
         pub fn pop(q: *Queue(T)) ?T {
+            const tr = tracy.trace(@src());
+            defer tr.end();
+
             q.lock.lock();
             defer q.lock.unlock();
             while (!q.closed) {
@@ -237,3 +243,4 @@ pub fn SegmentedList(comptime T: type, first_segment_size: usize) type {
 }
 
 const std = @import("std");
+const tracy = @import("tracy");

@@ -83,6 +83,9 @@ pub fn join(t: *Traverser) void {
 /// Wait for updates to the result buffer.
 /// Returns null if the traversal has finished.
 pub fn poll(t: *Traverser, prev_completed_outputs: u32) ?u32 {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     while (true) {
         const completed = t.completed_outputs.load(.monotonic);
         if (completed != prev_completed_outputs) return completed;
@@ -98,6 +101,9 @@ pub fn poll(t: *Traverser, prev_completed_outputs: u32) ?u32 {
 }
 
 fn worker(t: *Traverser, thread_id: u16) void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     while (t.queue.pop()) |id| {
         t.process(thread_id, id) catch |err| {
             const path = t.output.getPtr(id).?.path;
@@ -108,7 +114,14 @@ fn worker(t: *Traverser, thread_id: u16) void {
 
 // TODO: use local stack buffer to reduce contention
 fn process(t: *Traverser, thread_id: u16, id: u32) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     const result = t.output.getPtr(id).?;
+    if (tracy.enable) {
+        tr.setName(std.mem.span(result.path));
+    }
+
     const state = result.state.load(.monotonic);
     switch (state.unpack()) {
         .incomplete_directory => |count| {
@@ -134,6 +147,9 @@ fn process(t: *Traverser, thread_id: u16, id: u32) !void {
 }
 
 fn processFile(t: *Traverser, result: *Result.ThreadSafe) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     const linux = std.os.linux;
     var stx: linux.Statx = undefined;
     const rc = linux.statx(
@@ -163,21 +179,37 @@ fn processFile(t: *Traverser, result: *Result.ThreadSafe) !void {
 }
 
 fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     var arena = t.arenas[thread_id].promote(t.gpa);
     defer t.arenas[thread_id] = arena.state;
 
     const path = std.mem.span(result.path);
-    var dir = try t.root.openDirZ(path, .{ .iterate = true });
+
+    var dir = blk: {
+        const tr_ = tracy.traceNamed(@src(), "openDir");
+        defer tr_.end();
+
+        break :blk try t.root.openDirZ(path, .{ .iterate = true, .no_follow = true });
+    };
     defer dir.close();
 
     var count: u31 = 0;
     var it = dir.iterateAssumeFirstIteration();
-    while (try it.next()) |entry| {
+    while (true) {
+        const tr_ = tracy.traceNamed(@src(), "iterate directory");
+        defer tr_.end();
+
+        const entry = blk: {
+            const tr_next = tracy.traceNamed(@src(), "next");
+            defer tr_next.end();
+            break :blk try it.next();
+        } orelse break;
+        tr_.setName(entry.name);
+
         // TODO: open more FDs to avoid lengthy sub-paths
-        const child_path = try std.fs.path.joinZ(arena.allocator(), &.{
-            path,
-            entry.name,
-        });
+        const child_path = try std.fs.path.joinZ(arena.allocator(), &.{ path, entry.name });
 
         // OPTIM: test whether it's faster to `stat` files now, rather than queueing them
         const child = try t.output.append(t.gpa, .{
@@ -199,6 +231,9 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe
 }
 
 fn finishItem(t: *Traverser, result: *Result.ThreadSafe, size: u64) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     // OPTIM: this is really bad, probably causes a ton of false sharing. batch updates for files in the same dir
     const parent_id = result.parent;
     const parent_result = t.output.getPtr(parent_id).?;
@@ -210,6 +245,9 @@ fn finishItem(t: *Traverser, result: *Result.ThreadSafe, size: u64) !void {
 }
 
 fn finishChildren(t: *Traverser, parent: u32, result: *Result.ThreadSafe, count: u31) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     const new = result.state.finishChildren(count, .acq_rel).unpack();
     if (new == .completed_directory) {
         // All children completed

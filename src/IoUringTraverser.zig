@@ -283,10 +283,7 @@ fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) 
         tr_.setName(entry.name);
 
         // TODO: open more persistent FDs to avoid lengthy sub-paths
-        const child_path = try std.fs.path.joinZ(arena.allocator(), &.{
-            path,
-            entry.name,
-        });
+        const child_path = try std.fs.path.joinZ(arena.allocator(), &.{ path, entry.name });
 
         const child: u32 = @intCast(t.output.items.len);
         try t.output.append(t.gpa, .{
