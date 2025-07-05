@@ -79,22 +79,12 @@ pub fn run(t: *IoUringTraverser) !void {
                 const data: Task.IoData = @bitCast(cqe.user_data);
                 (switch (data.task) {
                     .process_file => t.processFile(data, cqe),
-
                     .process_dir => t.processDir(data, cqe),
-                    .finalize_dir => if (data.id == 0) {
-                        // The root is complete
-                        break;
-                    } else {
-                        try t.finishItem(data.id);
-                    },
-
                     .close_fd => {}, // No callback required
                 }) catch |err| {
                     const result = &t.output.items[data.id];
                     result.state = .pack(.{ .errored = err });
-                    if (data.id != 0) {
-                        try t.finishItem(data.id);
-                    }
+                    t.finishItem(data.id);
                 };
             }
         }
@@ -131,7 +121,7 @@ fn scheduleImmediately(t: *IoUringTraverser, task: Task) !void {
     const iodata: Task.IoData = .{
         .task = task,
         .id = switch (task) {
-            .process_file, .process_dir, .finalize_dir => |id| id,
+            .process_file, .process_dir => |id| id,
             .close_fd => 0,
         },
         .stat_buf = switch (task) {
@@ -168,8 +158,6 @@ fn scheduleImmediately(t: *IoUringTraverser, task: Task) !void {
             0,
         ),
 
-        .finalize_dir => sqe.prep_nop(),
-
         .close_fd => |fd| sqe.prep_close(fd),
     }
 
@@ -179,7 +167,6 @@ fn scheduleImmediately(t: *IoUringTraverser, task: Task) !void {
 const Task = union(enum(u4)) {
     process_file: u32,
     process_dir: u32,
-    finalize_dir: u32,
     close_fd: linux.fd_t,
 
     const IoData = packed struct(u64) {
@@ -217,7 +204,7 @@ fn processFile(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe)
     std.debug.assert(result.state.unpack() == .incomplete_file);
     result.size = t.stat_bufs.get(data.stat_buf).size;
     result.state = .pack(.completed_file);
-    try t.finishItem(data.id);
+    t.finishItem(data.id);
 }
 
 fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) !void {
@@ -310,28 +297,35 @@ fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) 
     t.output.items[data.id].state = .pack(.{ .incomplete_directory = count });
     if (count == 0) {
         // No children; finalize right away
-        try t.schedule(.{ .finalize_dir = data.id });
+        t.finishItem(data.id);
     }
 }
 
-fn finishItem(t: *IoUringTraverser, id: u32) !void {
-    const tr = tracy.trace(@src());
-    defer tr.end();
+fn finishItem(t: *IoUringTraverser, id_: u32) void {
+    var id = id_;
+    while (id != 0) {
+        const tr = tracy.trace(@src());
+        defer tr.end();
 
-    const result = &t.output.items[id];
+        const result = &t.output.items[id];
+        if (tracy.enable) {
+            tr.addText(std.mem.span(result.path));
+        }
 
-    const parent_result = &t.output.items[result.parent];
-    parent_result.size += result.size;
+        const parent_result = &t.output.items[result.parent];
+        parent_result.size += result.size;
 
-    if (parent_result.state.directory.not_a_directory) {
-        std.log.warn("{s} -> {s} {}", .{ result.path, parent_result.path, parent_result.state.unpack() });
-    } else {
-        parent_result.state.finishChildren(1);
-    }
-    if (parent_result.state.unpack() == .completed_directory) {
-        // All children completed
-        // TODO: just do a synchronous loop here instead of scheduling
-        try t.schedule(.{ .finalize_dir = result.parent });
+        if (parent_result.state.directory.not_a_directory) {
+            std.log.warn("{s} -> {s} {}", .{ result.path, parent_result.path, parent_result.state.unpack() });
+        } else {
+            parent_result.state.finishChildren(1);
+        }
+        if (parent_result.state.unpack() == .completed_directory) {
+            // All children completed
+            id = result.parent;
+        } else {
+            break;
+        }
     }
 }
 

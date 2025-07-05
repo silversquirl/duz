@@ -129,24 +129,15 @@ fn process(t: *Traverser, thread_id: u16, id: u32) !void {
             try t.processDir(thread_id, id, result);
         },
 
-        .completed_directory => if (id == 0) {
-            // The root is complete
-            t.stop();
-            // It is important that we do this last, as it will wake the main thread
-            _ = t.completed_outputs.fetchAdd(1, .release);
-            std.Thread.Futex.wake(&t.completed_outputs, std.math.maxInt(u32));
-        } else {
-            try t.finishItem(result, result.size.load(.monotonic));
-        },
+        .incomplete_file => try t.processFile(id, result),
 
-        .incomplete_file => try t.processFile(result),
-
+        .completed_directory => unreachable,
         .completed_file => unreachable,
         .errored => unreachable,
     }
 }
 
-fn processFile(t: *Traverser, result: *Result.ThreadSafe) !void {
+fn processFile(t: *Traverser, id: u32, result: *Result.ThreadSafe) !void {
     const tr = tracy.trace(@src());
     defer tr.end();
 
@@ -175,7 +166,7 @@ fn processFile(t: *Traverser, result: *Result.ThreadSafe) !void {
 
     result.size.store(stx.size, .monotonic);
     result.state.store(.pack(.completed_file), .monotonic);
-    try t.finishItem(result, stx.size);
+    t.finishItem(id, result, stx.size);
 }
 
 fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe) !void {
@@ -227,31 +218,39 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe
 
     // Set actual child count. We do this by subtracting rather than storing, in case any children have already been completed.
     const delta = Result.State.uninitialized_directory.incomplete_directory - count;
-    try t.finishChildren(id, result, delta);
+    t.finishChildren(id, result, delta);
 }
 
-fn finishItem(t: *Traverser, result: *Result.ThreadSafe, size: u64) !void {
+fn finishItem(t: *Traverser, id: u32, result: *Result.ThreadSafe, size: u64) void {
     const tr = tracy.trace(@src());
     defer tr.end();
 
-    // OPTIM: this is really bad, probably causes a ton of false sharing. batch updates for files in the same dir
-    const parent_id = result.parent;
-    const parent_result = t.output.getPtr(parent_id).?;
-    _ = parent_result.size.fetchAdd(size, .monotonic);
-    try t.finishChildren(parent_id, parent_result, 1);
+    if (id == 0) {
+        // The root is complete
+        t.stop();
+    }
 
     _ = t.completed_outputs.fetchAdd(1, .release);
     std.Thread.Futex.wake(&t.completed_outputs, std.math.maxInt(u32));
+
+    if (id != 0) {
+        // OPTIM: this is really bad, probably causes a ton of false sharing. batch updates for files in the same dir
+        const parent_id = result.parent;
+        const parent_result = t.output.getPtr(parent_id).?;
+        _ = parent_result.size.fetchAdd(size, .monotonic);
+        t.finishChildren(parent_id, parent_result, 1);
+    }
 }
 
-fn finishChildren(t: *Traverser, parent: u32, result: *Result.ThreadSafe, count: u31) !void {
+fn finishChildren(t: *Traverser, id: u32, result: *Result.ThreadSafe, count: u31) void {
     const tr = tracy.trace(@src());
     defer tr.end();
 
     const new = result.state.finishChildren(count, .acq_rel).unpack();
     if (new == .completed_directory) {
         // All children completed
-        try t.queue.push(t.gpa, parent);
+        // TODO: avoid recursion
+        t.finishItem(id, result, result.size.load(.monotonic));
     }
 }
 
