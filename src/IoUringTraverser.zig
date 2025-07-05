@@ -67,38 +67,53 @@ pub fn run(t: *IoUringTraverser) !void {
     t.outstanding_tasks += try t.uring.submit();
 
     while (t.outstanding_tasks > 0) {
-        var cqes: [64]linux.io_uring_cqe = undefined;
-        const count = try t.uring.copy_cqes(&cqes, t.outstanding_tasks);
-        t.outstanding_tasks -= count;
+        {
+            const tr_ = tracy.traceNamed(@src(), "cqe loop");
+            defer tr_.end();
 
-        for (cqes[0..count]) |cqe| {
-            const data: Task.IoData = @bitCast(cqe.user_data);
-            (switch (data.task) {
-                .process_file => t.processFile(data, cqe),
+            var cqes: [64]linux.io_uring_cqe = undefined;
+            const count = try t.uring.copy_cqes(&cqes, t.outstanding_tasks);
+            t.outstanding_tasks -= count;
 
-                .process_dir => t.processDir(data, cqe),
-                .finalize_dir => if (data.id == 0) {
-                    // The root is complete
-                    break;
-                } else {
-                    try t.finishItem(data.id);
-                },
+            for (cqes[0..count]) |cqe| {
+                const data: Task.IoData = @bitCast(cqe.user_data);
+                (switch (data.task) {
+                    .process_file => t.processFile(data, cqe),
 
-                .close_fd => {}, // No callback required
-            }) catch |err| {
-                const result = &t.output.items[data.id];
-                result.state = .pack(.{ .errored = err });
-                if (data.id != 0) {
-                    try t.finishItem(data.id);
-                }
-            };
+                    .process_dir => t.processDir(data, cqe),
+                    .finalize_dir => if (data.id == 0) {
+                        // The root is complete
+                        break;
+                    } else {
+                        try t.finishItem(data.id);
+                    },
+
+                    .close_fd => {}, // No callback required
+                }) catch |err| {
+                    const result = &t.output.items[data.id];
+                    result.state = .pack(.{ .errored = err });
+                    if (data.id != 0) {
+                        try t.finishItem(data.id);
+                    }
+                };
+            }
         }
-        t.outstanding_tasks += try t.uring.submit();
 
-        // Push overflow tasks back onto the IO queue
-        while (t.overflow.getLastOrNull()) |task| {
-            t.scheduleImmediately(task) catch break;
-            t.overflow.items.len -= 1;
+        {
+            const tr_ = tracy.traceNamed(@src(), "sq submit");
+            defer tr_.end();
+            t.outstanding_tasks += try t.uring.submit();
+        }
+
+        {
+            const tr_ = tracy.traceNamed(@src(), "flush overflow");
+            defer tr_.end();
+
+            // Push overflow tasks back onto the IO queue
+            while (t.overflow.getLastOrNull()) |task| {
+                t.scheduleImmediately(task) catch break;
+                t.overflow.items.len -= 1;
+            }
         }
     }
 }
@@ -109,6 +124,10 @@ fn schedule(t: *IoUringTraverser, task: Task) !void {
     };
 }
 fn scheduleImmediately(t: *IoUringTraverser, task: Task) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+    tr.addText(@tagName(task));
+
     const iodata: Task.IoData = .{
         .task = task,
         .id = switch (task) {
@@ -171,6 +190,14 @@ const Task = union(enum(u4)) {
 };
 
 fn processFile(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
+    const result = &t.output.items[data.id];
+    if (tracy.enable) {
+        tr.addText(std.mem.span(result.path));
+    }
+
     defer t.stat_bufs.del(data.stat_buf);
 
     switch (cqe.err()) {
@@ -187,7 +214,6 @@ fn processFile(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe)
         else => |err| return std.posix.unexpectedErrno(err),
     }
 
-    const result = &t.output.items[data.id];
     std.debug.assert(result.state.unpack() == .incomplete_file);
     result.size = t.stat_bufs.get(data.stat_buf).size;
     result.state = .pack(.completed_file);
@@ -195,6 +221,14 @@ fn processFile(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe)
 }
 
 fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
+    if (tracy.enable) {
+        const result = &t.output.items[data.id];
+        tr.addText(std.mem.span(result.path));
+    }
+
     switch (cqe.err()) {
         .SUCCESS => {},
 
@@ -237,7 +271,17 @@ fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) 
     var count: u31 = 0;
     var dir: std.fs.Dir = .{ .fd = fd };
     var it = dir.iterateAssumeFirstIteration();
-    while (try it.next()) |entry| {
+    while (true) {
+        const tr_ = tracy.traceNamed(@src(), "iterate directory");
+        defer tr_.end();
+
+        const entry = blk: {
+            const tr_next = tracy.traceNamed(@src(), "next");
+            defer tr_next.end();
+            break :blk try it.next();
+        } orelse break;
+        tr_.setName(entry.name);
+
         // TODO: open more persistent FDs to avoid lengthy sub-paths
         const child_path = try std.fs.path.joinZ(arena.allocator(), &.{
             path,
@@ -274,6 +318,9 @@ fn processDir(t: *IoUringTraverser, data: Task.IoData, cqe: linux.io_uring_cqe) 
 }
 
 fn finishItem(t: *IoUringTraverser, id: u32) !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     const result = &t.output.items[id];
 
     const parent_result = &t.output.items[result.parent];

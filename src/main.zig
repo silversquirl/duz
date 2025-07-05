@@ -33,6 +33,8 @@ pub fn main() !void {
         var bufw = std.io.bufferedWriter(stdout);
         const out = bufw.writer();
 
+        const tr_ = tracy.traceNamed(@src(), "print");
+        defer tr_.end();
         const count = switch (traverser) {
             .io_uring => |*t| t.output.items.len,
             .threaded => |*t| t.output.len.load(.acquire),
