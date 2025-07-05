@@ -3,14 +3,14 @@ const IoUringTraverser = @This();
 const uring_queue_size = 4096;
 
 gpa: std.mem.Allocator,
-arena: std.heap.ArenaAllocator.State,
 root: std.fs.Dir,
 
 uring: linux.IoUring,
 stat_bufs: Store(u28, linux.Statx),
-// overflow_queue: std.ArrayListUnmanaged(
+overflow: std.ArrayListUnmanaged(Task),
 outstanding_tasks: u32,
 
+arena: std.heap.ArenaAllocator.State,
 output: std.ArrayListUnmanaged(Result),
 
 pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !IoUringTraverser {
@@ -29,21 +29,24 @@ pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !IoUring
 
     return .{
         .gpa = general_purpose_alloc,
-        .arena = .{},
         .root = root,
 
         // OPTIM: IOPOLL, SQPOLL
         .uring = try linux.IoUring.init(uring_queue_size, 0),
         .stat_bufs = .empty,
+        .overflow = .empty,
         .outstanding_tasks = 0,
 
+        .arena = .{},
         .output = .empty,
     };
 }
 pub fn deinit(t: *IoUringTraverser) void {
-    t.output.deinit(t.gpa);
     t.uring.deinit();
     t.stat_bufs.deinit(t.gpa);
+    t.overflow.deinit(t.gpa);
+
+    t.output.deinit(t.gpa);
     var arena = t.arena.promote(t.gpa);
     arena.deinit();
 }
@@ -91,12 +94,19 @@ pub fn run(t: *IoUringTraverser) !void {
             };
         }
         t.outstanding_tasks += try t.uring.submit();
+
+        // Push overflow tasks back onto the IO queue
+        while (t.overflow.getLastOrNull()) |task| {
+            t.scheduleImmediately(task) catch break;
+            t.overflow.items.len -= 1;
+        }
     }
 }
 
 fn schedule(t: *IoUringTraverser, task: Task) !void {
-    // TODO
-    try t.scheduleImmediately(task);
+    t.scheduleImmediately(task) catch {
+        try t.overflow.append(t.gpa, task);
+    };
 }
 fn scheduleImmediately(t: *IoUringTraverser, task: Task) !void {
     const iodata: Task.IoData = .{
