@@ -23,7 +23,7 @@ pub fn main() !void {
         switch (traverser) {
             .io_uring => |*t| try t.run(),
             .threaded => |*t| {
-                const thread_count = opts.thread_count orelse try std.Thread.getCpuCount();
+                const thread_count = opts.thread_count orelse (try std.Thread.getCpuCount()) * 5 / 2;
                 try t.start(thread_count);
                 t.join();
             },
