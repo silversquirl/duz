@@ -22,7 +22,8 @@ pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !IoUring
             std.log.debug("raising FD limit from {} to {}", .{ limit.cur, limit.max });
             limit.cur = limit.max;
             std.posix.setrlimit(.NOFILE, limit) catch |err| {
-                std.log.warn("failed to raise file descriptor limit: {s}", .{@errorName(err)});
+                // Should never happen, unless someone is messing with us
+                std.debug.panic("failed to raise file descriptor limit: {s}", .{@errorName(err)});
             };
         }
     }

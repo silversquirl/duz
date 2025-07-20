@@ -23,7 +23,7 @@ pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !Travers
         .threads = undefined,
         .completed_outputs = .init(0),
         .output = .empty,
-        .queue = .empty,
+        .queue = .init("traversal queue"),
     };
 }
 
@@ -45,6 +45,10 @@ pub fn start(t: *Traverser, thread_count: usize) !void {
     try t.queue.array.append(t.gpa, @intCast(root_id));
 
     t.thread_count = @max(1, @min(thread_count, max_threads));
+    if (thread_count > max_threads) {
+        std.log.warn("thread count capped at {}", .{max_threads});
+    }
+
     for (t.threads[0..t.thread_count], 0..) |*thread, thread_id| {
         thread.* = try std.Thread.spawn(.{}, worker, .{ t, @as(u16, @intCast(thread_id)) });
     }
@@ -222,8 +226,9 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe
 }
 
 fn finishItem(t: *Traverser, id: u32, result: *Result.ThreadSafe, size: u64) void {
-    const tr = tracy.trace(@src());
-    defer tr.end();
+    // TODO: can't deal with tail calls
+    // const tr = tracy.trace(@src());
+    // defer tr.end();
 
     if (id == 0) {
         // The root is complete
@@ -244,8 +249,9 @@ fn finishItem(t: *Traverser, id: u32, result: *Result.ThreadSafe, size: u64) voi
 
 // Takes a u64 to match the signature of finishItem, for tail calling reasons
 fn finishChildren(t: *Traverser, id: u32, result: *Result.ThreadSafe, count: u64) void {
-    const tr = tracy.trace(@src());
-    defer tr.end();
+    // TODO: can't deal with tail calls
+    // const tr = tracy.trace(@src());
+    // defer tr.end();
 
     const new = result.state.finishChildren(@intCast(count), .acq_rel).unpack();
     if (new == .completed_directory) {

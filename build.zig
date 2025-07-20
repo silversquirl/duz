@@ -3,14 +3,25 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const tsan = b.option(bool, "tsan", "Enable thread sanitizer (default: in Debug)") orelse (optimize == .Debug);
+
+    const tracy_enable = b.option(bool, "tracy", "Enable tracy profiling (default: false)") orelse false;
+    if (tracy_enable and optimize == .Debug) {
+        std.log.warn("tracy is enabled, but compiling in debug mode", .{});
+    }
+
     const tracy_dep = b.dependency("tracy", .{
         .target = target,
         .optimize = optimize,
-        .enable = b.option(bool, "tracy", "Enable tracy profiling (default: false)") orelse false,
+        .enable = tracy_enable,
         .allocation = b.option(bool, "tracy-alloc", "Enable tracy allocation profiling (default: true)") orelse true,
         .sampling = b.option(bool, "tracy-sampling", "Enable tracy's sampling profiler (default: true)") orelse true,
-        .wait = true,
+        .wait = b.option(bool, "tracy-wait", "Wait for server to attach before exiting (default: true)") orelse true,
     });
+
+    const opts = b.addOptions();
+    const TraceLevel = enum { normal, verbose };
+    const trace_level = b.option(TraceLevel, "trace-level", "Set the trace level (only applies when tracy is enabled)") orelse .normal;
+    opts.addOption(TraceLevel, "trace_level", trace_level);
 
     const exe = b.addExecutable(.{
         .name = "duz",
@@ -20,6 +31,8 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.sanitize_thread = tsan;
     exe.root_module.addImport("tracy", tracy_dep.module("tracy"));
+    exe.root_module.addImport("tracy_always_disabled", tracy_dep.module("tracy_always_disabled"));
+    exe.root_module.addImport("build_options", opts.createModule());
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

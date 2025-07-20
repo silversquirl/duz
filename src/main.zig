@@ -1,4 +1,7 @@
 pub fn main() !void {
+    const tr = tracy.trace(@src());
+    defer tr.end();
+
     defer if (root_allocator.is_debug) {
         _ = root_allocator.debug.deinit();
     };
@@ -6,24 +9,30 @@ pub fn main() !void {
 
     const opts = try parseArgs(gpa);
     defer opts.arena.deinit();
+    const thread_count = opts.thread_count orelse (try std.Thread.getCpuCount()) * 5 / 2;
 
     for (opts.paths) |path| {
-        const tr = tracy.traceNamed(@src(), "path loop");
-        defer tr.end();
-        tr.setName(path);
+        const tr_loop = tracy.traceNamed(@src(), "path loop iteration");
+        defer tr_loop.end();
+        tr_loop.setName(path);
 
         const dir = try std.fs.cwd().openDir(path, .{});
 
         var traverser: Traverser = switch (opts.backend) {
+            .scheduled => .{ .scheduled = .{ .results = undefined, .arena = .init(gpa) } },
             inline else => |b| @unionInit(Traverser, @tagName(b), try .init(gpa, dir)),
         };
         defer switch (traverser) {
+            .scheduled => |sched| sched.arena.deinit(),
             inline else => |*t| t.deinit(),
         };
         switch (traverser) {
             .io_uring => |*t| try t.run(),
+            .scheduled => |*sched| {
+                const results, const arena = try ScheduledTraverser.run(gpa, dir, thread_count);
+                sched.* = .{ .results = results, .arena = arena };
+            },
             .threaded => |*t| {
-                const thread_count = opts.thread_count orelse (try std.Thread.getCpuCount()) * 5 / 2;
                 try t.start(thread_count);
                 t.join();
             },
@@ -33,16 +42,19 @@ pub fn main() !void {
         var bufw = std.io.bufferedWriter(stdout);
         const out = bufw.writer();
 
-        const tr_ = tracy.traceNamed(@src(), "print");
-        defer tr_.end();
+        const tr_print = tracy.traceNamed(@src(), "print results");
+        defer tr_print.end();
         const count = switch (traverser) {
             .io_uring => |*t| t.output.items.len,
             .threaded => |*t| t.output.len.load(.acquire),
+            .scheduled => |sched| sched.results.len,
         };
+        std.log.debug("{} results", .{count});
         for (0..count) |id| {
             const result: Result = switch (traverser) {
                 .io_uring => |*t| t.output.items[id],
                 .threaded => |*t| t.output.getPtr(id).?.load(),
+                .scheduled => |sched| sched.results[id],
             };
 
             var suffix: []const u8 = "";
@@ -81,6 +93,10 @@ pub fn main() !void {
 const Traverser = union(Options.Backend) {
     io_uring: IoUringTraverser,
     threaded: ThreadedTraverser,
+    scheduled: struct {
+        results: []Result,
+        arena: std.heap.ArenaAllocator,
+    },
 };
 
 fn parseArgs(gpa: std.mem.Allocator) !Options {
@@ -134,11 +150,11 @@ fn parseArgs(gpa: std.mem.Allocator) !Options {
 
 const Options = struct {
     arena: std.heap.ArenaAllocator,
-    backend: Backend = .io_uring,
+    backend: Backend = .threaded,
     thread_count: ?usize = null,
     paths: []const []const u8 = &.{"."},
 
-    const Backend = enum { io_uring, threaded };
+    const Backend = enum { io_uring, threaded, scheduled };
 };
 
 const usage = "Usage: duz [options] [paths...]\n";
@@ -146,8 +162,8 @@ const help = usage ++
     \\
     \\Options:
     \\  -h, --help              Print this help message and exit
-    \\  --backend               Select backend to use ([io_uring], threaded)
-    \\  -j <n>, --threads <n>   Number of threads to use for threaded backend
+    \\  --backend               Select backend to use ([threaded], io_uring, scheduled)
+    \\  -j <n>, --threads <n>   Number of threads to use for multithreaded backends
     \\
     \\
 ;
@@ -166,3 +182,4 @@ const tracy = @import("tracy");
 const Result = @import("Result.zig");
 const ThreadedTraverser = @import("Traverser.zig");
 const IoUringTraverser = @import("IoUringTraverser.zig");
+const ScheduledTraverser = @import("ScheduledTraverser.zig");
