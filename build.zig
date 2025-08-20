@@ -23,16 +23,20 @@ pub fn build(b: *std.Build) void {
     const trace_level = b.option(TraceLevel, "trace-level", "Set the trace level (only applies when tracy is enabled)") orelse .normal;
     opts.addOption(TraceLevel, "trace_level", trace_level);
 
-    const exe = b.addExecutable(.{
-        .name = "duz",
+    const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.sanitize_thread = tsan;
-    exe.root_module.addImport("tracy", tracy_dep.module("tracy"));
-    exe.root_module.addImport("tracy_always_disabled", tracy_dep.module("tracy_always_disabled"));
-    exe.root_module.addImport("build_options", opts.createModule());
+    mod.sanitize_thread = tsan;
+    mod.addImport("tracy", tracy_dep.module("tracy"));
+    mod.addImport("tracy_always_disabled", tracy_dep.module("tracy_always_disabled"));
+    mod.addImport("build_options", opts.createModule());
+
+    const exe = b.addExecutable(.{
+        .name = "duz",
+        .root_module = mod,
+    });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

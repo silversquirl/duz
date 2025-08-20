@@ -4,9 +4,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .tracy = .{
-            // .url = "git+https://github.com/silversquirl/zig-tracy#1abc521694538ff5ad87ee1860065130e832e528",
-            // .hash = "tracy-0.11.1-ta-nfs8-AADsgQiwf7v1dtR1Ka1z6A9M7EMPzQUArxHQ",
-            .path = "../zig-tracy",
+            .url = "git+https://github.com/silversquirl/zig-tracy#ce199f286098ad97f518ae53e2591814b8f30934",
+            .hash = "tracy-0.11.1-ta-nfqNJAABI0bPZYDJNeWwi7NV9kGHnpYeB3692U1mX",
         },
     },
     .minimum_zig_version = "0.14.1",
