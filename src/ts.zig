@@ -46,13 +46,7 @@ pub fn Queue(comptime T: type) type {
                 tracy.message("start unlock");
                 q.mutex.unlock();
                 tracy.message("end unlock");
-                var t = std.time.Timer.start() catch @panic("no timer");
                 tr_.end();
-                const dt = t.read();
-                if (dt > std.time.ns_per_us * 100) {
-                    std.debug.print("end took {}us\n", .{dt / std.time.ns_per_us});
-                    @breakpoint();
-                }
             }
             try q.array.append(allocator, item);
             tracy.message("added item");
