@@ -327,15 +327,12 @@ const Node = struct {
 
     fn reportFail(node: Node, operation: []const u8, result: anytype) @TypeOf(result) {
         _ = result catch |err| {
-            std.log.err("Failed to {s} '{}': {s}", .{ operation, node.fmtPath(), @errorName(err) });
+            std.log.err("Failed to {s} '{f}': {s}", .{ operation, node, @errorName(err) });
         };
         return result;
     }
 
-    fn fmtPath(node: *const Node) std.fmt.Formatter(formatPath) {
-        return .{ .data = node };
-    }
-    fn formatPath(node: *const Node, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(node: *const Node, writer: *std.Io.Writer) !void {
         var path: [128][*:0]const u8 = undefined;
         var path_start: usize = path.len;
         {
@@ -523,14 +520,14 @@ const Task = union(enum) {
                 const parent_fd = try parent.openDir();
                 defer {} // leave the fd open so we can reuse it
                 node.size = try node.reportFail("stat file", fs.fileSize(parent_fd, node.name));
-                std.log.debug("file {} is {:.2}", .{ node.fmtPath(), std.fmt.fmtIntSizeBin(node.size) });
+                std.log.debug("file {f} is {Bi:.2}", .{ node, node.size });
             },
 
             .list_dir => |*params| {
                 const fd = try params.node.openDir();
                 defer {} // leave the fd open so we can reuse it
                 params.out = try params.node.reportFail("read directory", fs.listDir(gpa, arena, fd));
-                std.log.debug("dir {} has {} children", .{ params.node.fmtPath(), params.out.entries.len });
+                std.log.debug("dir {f} has {} children", .{ params.node, params.out.entries.len });
             },
 
             .none => {},

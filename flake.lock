@@ -1,5 +1,26 @@
 {
   "nodes": {
+    "gitignore": {
+      "inputs": {
+        "nixpkgs": [
+          "zls",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1709087332,
+        "narHash": "sha256-HG2cCnktfHsKV0s4XW83gU3F57gaTljL9KNSuG6bnQs=",
+        "owner": "hercules-ci",
+        "repo": "gitignore.nix",
+        "rev": "637db329424fd7e46cf4185293b9cc8c88c95394",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "gitignore.nix",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1755736253,
@@ -17,7 +38,8 @@
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "zig": "zig"
+        "zig": "zig",
+        "zls": "zls"
       }
     },
     "zig": {
@@ -27,17 +49,41 @@
         ]
       },
       "locked": {
-        "lastModified": 1755873199,
-        "narHash": "sha256-La/ckB31eo2QDLzd6ouW+RVqJD9iioSVadBc8o1PuC4=",
+        "lastModified": 1755873160,
+        "narHash": "sha256-5tQdhrjbusTUapJsUQwLbfnDA9G25gp0yRJYcwZyGmw=",
         "owner": "silversquirl",
         "repo": "zig-flake",
-        "rev": "296a834bda7dd01e9153301774a54c5c46aefce7",
+        "rev": "37868f0ea9491837df2c685fb63e6a545ac9810a",
         "type": "github"
       },
       "original": {
         "owner": "silversquirl",
-        "ref": "compat",
         "repo": "zig-flake",
+        "type": "github"
+      }
+    },
+    "zls": {
+      "inputs": {
+        "gitignore": "gitignore",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "zig": [
+          "zig"
+        ]
+      },
+      "locked": {
+        "lastModified": 1755873320,
+        "narHash": "sha256-VXxoR/v72bVsoJ2QXwQahWwvf0w18XmjQbQ3V8r4WEE=",
+        "owner": "zigtools",
+        "repo": "zls",
+        "rev": "7edadce7dafa6878b7cf940ca5c199dad4b74143",
+        "type": "github"
+      },
+      "original": {
+        "owner": "zigtools",
+        "ref": "pull/2457/head",
+        "repo": "zls",
         "type": "github"
       }
     }

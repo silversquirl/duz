@@ -243,7 +243,8 @@ fn finishItem(t: *Traverser, id: u32, result: *Result.ThreadSafe, size: u64) voi
         const parent_id = result.parent;
         const parent_result = t.output.getPtr(parent_id).?;
         _ = parent_result.size.fetchAdd(size, .monotonic);
-        @call(.always_tail, finishChildren, .{ t, parent_id, parent_result, 1 });
+        // TODO: avoid recursion
+        finishChildren(t, parent_id, parent_result, 1);
     }
 }
 
@@ -257,7 +258,7 @@ fn finishChildren(t: *Traverser, id: u32, result: *Result.ThreadSafe, count: u64
     if (new == .completed_directory) {
         // All children completed
         // TODO: avoid recursion
-        @call(.always_tail, finishItem, .{ t, id, result, result.size.load(.monotonic) });
+        finishItem(t, id, result, result.size.load(.monotonic));
     }
 }
 

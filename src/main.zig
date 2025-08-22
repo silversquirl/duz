@@ -11,6 +11,9 @@ pub fn main() !void {
     defer opts.arena.deinit();
     const thread_count = opts.thread_count orelse (try std.Thread.getCpuCount()) * 5 / 2;
 
+    var out_buf: [4096]u8 = undefined;
+    var out = std.fs.File.stdout().writerStreaming(&out_buf);
+
     for (opts.paths) |path| {
         const tr_loop = tracy.traceNamed(@src(), "path loop iteration");
         defer tr_loop.end();
@@ -37,10 +40,6 @@ pub fn main() !void {
                 t.join();
             },
         }
-
-        const stdout = std.io.getStdOut().writer();
-        var bufw = std.io.bufferedWriter(stdout);
-        const out = bufw.writer();
 
         const tr_print = tracy.traceNamed(@src(), "print results");
         defer tr_print.end();
@@ -73,18 +72,18 @@ pub fn main() !void {
                 .incomplete_file => unreachable,
             }
 
-            out.print("{: >10.1}  {s}{s}\n", .{
-                std.fmt.fmtIntSizeBin(result.size),
+            out.interface.print("{Bi: >10.1}  {s}{s}\n", .{
+                result.size,
                 result.path,
                 suffix,
-            }) catch |err| switch (err) {
+            }) catch switch (out.err orelse error.WriteFailed) {
                 error.BrokenPipe => break,
                 else => |e| return e,
             };
         }
 
-        bufw.flush() catch |err| switch (err) {
-            error.BrokenPipe => {},
+        out.interface.flush() catch switch (out.err orelse error.WriteFailed) {
+            error.BrokenPipe => break,
             else => |e| return e,
         };
     }
@@ -115,7 +114,7 @@ fn parseArgs(gpa: std.mem.Allocator) !Options {
         if (std.mem.eql(u8, flag, "--")) {
             break;
         } else if (std.mem.eql(u8, flag, "-h") or std.mem.eql(u8, flag, "--help")) {
-            std.io.getStdOut().writeAll(help) catch {};
+            std.fs.File.stdout().writeAll(help) catch {};
             std.process.exit(0);
         } else if (std.mem.eql(u8, flag, "--backend")) {
             const arg = args.next() orelse {
