@@ -48,12 +48,6 @@ pub fn ThreadPool(comptime Worker: type, comptime Task: type) type {
                 gpa.free(runner.buf);
             };
             while (runner_idx < runners.len) : (runner_idx += 1) {
-                var queue_name_buf: [128]u8 = undefined;
-                const queue_name = std.fmt.bufPrintZ(&queue_name_buf, "worker queue {}", .{runner_idx}) catch "worker queue";
-
-                const plot = tracy.plot(queue_name);
-                plot.update(0);
-
                 const runner = &runners[runner_idx];
                 runner.* = .{
                     .mutex = .{},
@@ -65,9 +59,16 @@ pub fn ThreadPool(comptime Worker: type, comptime Task: type) type {
                     .worker = undefined,
                     .thread = undefined,
 
-                    .plot = plot,
+                    .plot_name_buf = undefined,
+                    .plot = undefined,
                 };
                 errdefer gpa.free(runner.buf);
+
+                if (tracy.enable) {
+                    const queue_name = std.fmt.bufPrintZ(&runner.plot_name_buf, "worker {}", .{runner_idx}) catch "worker";
+                    runner.plot = tracy.plot(queue_name);
+                    runner.plot.update(0);
+                }
             }
 
             // Initialize worker state
@@ -170,6 +171,7 @@ pub fn ThreadPool(comptime Worker: type, comptime Task: type) type {
             worker: Worker,
             thread: std.Thread,
 
+            plot_name_buf: if (tracy.enable) [64]u8 else void,
             plot: tracy.Plot,
 
             fn deinit(runner: *Runner, gpa: std.mem.Allocator) void {
@@ -279,6 +281,7 @@ pub fn ThreadPool(comptime Worker: type, comptime Task: type) type {
                     }
 
                     // Wait for update
+                    tracy.messageColor("block", 0xff0000);
                     std.Thread.Futex.wait(@ptrCast(&pool.wait_state), @bitCast(state));
                 }
             }
