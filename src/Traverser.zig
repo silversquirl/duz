@@ -3,27 +3,24 @@ const Traverser = @This();
 const max_threads = 64;
 
 gpa: std.mem.Allocator,
+arena: std.heap.ArenaAllocator.State,
 root: std.fs.Dir,
-thread_count: u16,
 
-arenas: [max_threads]std.heap.ArenaAllocator.State,
-threads: [max_threads]std.Thread,
 completed_outputs: std.atomic.Value(u32),
 output: ts.SegmentedList(Result.ThreadSafe, 1024),
-queue: ts.Queue(u32),
-joined: bool = false,
+pool: ThreadPool(Worker, u32),
+state: enum { init, started, joined },
 
 pub fn init(general_purpose_alloc: std.mem.Allocator, root: std.fs.Dir) !Traverser {
     return .{
         .gpa = general_purpose_alloc,
+        .arena = .{},
         .root = root,
-        .thread_count = 0,
 
-        .arenas = @splat(.{}),
-        .threads = undefined,
         .completed_outputs = .init(0),
         .output = .empty,
-        .queue = .init("traversal queue"),
+        .pool = undefined,
+        .state = .init,
     };
 }
 
@@ -33,8 +30,11 @@ pub fn start(t: *Traverser, thread_count: usize) !void {
     const tr = tracy.trace(@src());
     defer tr.end();
 
+    std.debug.assert(t.state == .init);
+
     t.output.clearRetainingCapacity();
-    t.queue.array.clearRetainingCapacity();
+    try t.pool.init(t.gpa, thread_count, .{t});
+    errdefer t.pool.deinit(t.gpa);
 
     const root_id = try t.output.append(t.gpa, .{
         .parent = 0,
@@ -42,34 +42,25 @@ pub fn start(t: *Traverser, thread_count: usize) !void {
         .state = .init(.uninitialized_directory),
     });
     std.debug.assert(root_id == 0);
-    try t.queue.array.append(t.gpa, @intCast(root_id));
+    try t.pool.run(t.gpa, @intCast(root_id));
 
-    t.thread_count = @max(1, @min(thread_count, max_threads));
-    if (thread_count > max_threads) {
-        std.log.warn("thread count capped at {}", .{max_threads});
-    }
-
-    for (t.threads[0..t.thread_count], 0..) |*thread, thread_id| {
-        thread.* = try std.Thread.spawn(.{}, worker, .{ t, @as(u16, @intCast(thread_id)) });
-    }
+    t.state = .started;
 }
 
 /// Stop the search, wait for threads to exit, and release all resources.
 pub fn deinit(t: *Traverser) void {
-    t.stop();
-    t.join();
+    switch (t.state) {
+        .init, .joined => {},
+        .started => {
+            t.pool.deinit(t.gpa);
+            t.pool = undefined;
+        },
+    }
 
     t.output.deinit(t.gpa);
-    t.queue.deinit(t.gpa);
-
-    for (t.arenas[0..t.thread_count]) |state| {
-        var arena = state.promote(t.gpa);
-        arena.deinit();
-    }
-}
-
-pub fn stop(t: *Traverser) void {
-    t.queue.close();
+    var arena = t.arena.promote(t.gpa);
+    defer t.arena = arena.state;
+    arena.deinit();
 }
 
 /// Wait for all threads to exit. Not thread-safe.
@@ -77,11 +68,16 @@ pub fn join(t: *Traverser) void {
     const tr = tracy.trace(@src());
     defer tr.end();
 
-    if (t.joined) return;
-    t.joined = true;
-    for (t.threads[0..t.thread_count]) |thread| {
-        thread.join();
+    switch (t.state) {
+        .init, .joined => {},
+        .started => {
+            t.pool.waitForCancel();
+            std.log.debug("deinit pool", .{});
+            t.pool.deinit(t.gpa);
+            t.pool = undefined;
+        },
     }
+    t.state = .joined;
 }
 
 /// Wait for updates to the result buffer.
@@ -104,42 +100,63 @@ pub fn poll(t: *Traverser, prev_completed_outputs: u32) ?u32 {
     }
 }
 
-fn worker(t: *Traverser, thread_id: u16) void {
-    const tr = tracy.trace(@src());
-    defer tr.end();
+const Worker = struct {
+    arena: std.heap.ArenaAllocator,
+    traverser: *Traverser,
 
-    while (t.queue.pop()) |id| {
-        t.process(thread_id, id) catch |err| {
-            const path = t.output.getPtr(id).?.path;
-            std.log.err("{s}: {s}", .{ path, @errorName(err) });
-        };
-    }
-}
-
-// TODO: use local stack buffer to reduce contention
-fn process(t: *Traverser, thread_id: u16, id: u32) !void {
-    const tr = tracy.trace(@src());
-    defer tr.end();
-
-    const result = t.output.getPtr(id).?;
-    if (tracy.enable) {
-        tr.setName(std.mem.span(result.path));
+    pub fn init(worker: *Worker, t: *Traverser) !void {
+        worker.traverser = t;
+        worker.arena = .init(t.gpa);
     }
 
-    const state = result.state.load(.monotonic);
-    switch (state.unpack()) {
-        .incomplete_directory => |count| {
-            std.debug.assert(count == Result.State.uninitialized_directory.incomplete_directory);
-            try t.processDir(thread_id, id, result);
-        },
-
-        .incomplete_file => try t.processFile(id, result),
-
-        .completed_directory => unreachable,
-        .completed_file => unreachable,
-        .errored => unreachable,
+    pub fn deinit(worker: Worker) void {
+        // Merge the Worker's thread-local arena into the Traverser's global arena
+        const local_arena = &worker.arena.state;
+        const global_arena = &worker.traverser.arena;
+        if (local_arena.buffer_list.first) |first| {
+            var node = first.next;
+            while (node) |n| {
+                const next = n.next;
+                global_arena.buffer_list.prepend(n);
+                node = next;
+            }
+            global_arena.buffer_list.prepend(first);
+            global_arena.end_index = local_arena.end_index;
+        }
     }
-}
+
+    // TODO: use local stack buffer to reduce contention
+    pub fn run(worker: *Worker, id: u32) error{}!void {
+        const tr = tracy.trace(@src());
+        defer tr.end();
+
+        const t = worker.traverser;
+        std.log.debug("process {d}", .{id});
+
+        const result = t.output.getPtr(id).?;
+        if (tracy.enable) {
+            tr.setName(std.mem.span(result.path));
+        }
+
+        const state = result.state.load(.monotonic);
+        switch (state.unpack()) {
+            .incomplete_directory => |count| {
+                std.debug.assert(count == Result.State.uninitialized_directory.incomplete_directory);
+                t.processDir(worker.arena.allocator(), id, result) catch |err| {
+                    std.log.err("{s}: {s}", .{ result.path, @errorName(err) });
+                };
+            },
+
+            .incomplete_file => t.processFile(id, result) catch |err| {
+                std.log.err("{s}: {s}", .{ result.path, @errorName(err) });
+            },
+
+            .completed_directory => unreachable,
+            .completed_file => unreachable,
+            .errored => unreachable,
+        }
+    }
+};
 
 fn processFile(t: *Traverser, id: u32, result: *Result.ThreadSafe) !void {
     const tr = tracy.trace(@src());
@@ -173,12 +190,9 @@ fn processFile(t: *Traverser, id: u32, result: *Result.ThreadSafe) !void {
     t.finishItem(id, result, stx.size);
 }
 
-fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe) !void {
+fn processDir(t: *Traverser, arena: std.mem.Allocator, id: u32, result: *Result.ThreadSafe) !void {
     const tr = tracy.trace(@src());
     defer tr.end();
-
-    var arena = t.arenas[thread_id].promote(t.gpa);
-    defer t.arenas[thread_id] = arena.state;
 
     const path = std.mem.span(result.path);
 
@@ -204,7 +218,7 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe
         tr_.setName(entry.name);
 
         // TODO: open more FDs to avoid lengthy sub-paths
-        const child_path = try std.fs.path.joinZ(arena.allocator(), &.{ path, entry.name });
+        const child_path = try std.fs.path.joinZ(arena, &.{ path, entry.name });
 
         // OPTIM: test whether it's faster to `stat` files now, rather than queueing them
         const child = try t.output.append(t.gpa, .{
@@ -217,7 +231,7 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe
         });
         count += 1;
 
-        try t.queue.push(t.gpa, @intCast(child));
+        try t.pool.run(t.gpa, @intCast(child));
     }
 
     // Set actual child count. We do this by subtracting rather than storing, in case any children have already been completed.
@@ -226,13 +240,12 @@ fn processDir(t: *Traverser, thread_id: u16, id: u32, result: *Result.ThreadSafe
 }
 
 fn finishItem(t: *Traverser, id: u32, result: *Result.ThreadSafe, size: u64) void {
-    // TODO: can't deal with tail calls
-    // const tr = tracy.trace(@src());
-    // defer tr.end();
+    const tr = tracy.trace(@src());
+    defer tr.end();
 
     if (id == 0) {
         // The root is complete
-        t.stop();
+        t.pool.cancel();
     }
 
     _ = t.completed_outputs.fetchAdd(1, .release);
@@ -266,3 +279,4 @@ const std = @import("std");
 const tracy = @import("tracy");
 const ts = @import("ts.zig");
 const Result = @import("Result.zig");
+const ThreadPool = @import("thread_pool.zig").ThreadPool;
