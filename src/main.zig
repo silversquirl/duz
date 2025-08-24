@@ -21,40 +21,17 @@ pub fn main() !void {
 
         const dir = try std.fs.cwd().openDir(path, .{});
 
-        var traverser: Traverser = switch (opts.backend) {
-            .scheduled => .{ .scheduled = .{ .results = undefined, .arena = .init(gpa) } },
-            inline else => |b| @unionInit(Traverser, @tagName(b), try .init(gpa, dir)),
-        };
-        defer switch (traverser) {
-            .scheduled => |sched| sched.arena.deinit(),
-            inline else => |*t| t.deinit(),
-        };
-        switch (traverser) {
-            .io_uring => |*t| try t.run(),
-            .scheduled => |*sched| {
-                const results, const arena = try ScheduledTraverser.run(gpa, dir, thread_count);
-                sched.* = .{ .results = results, .arena = arena };
-            },
-            .threaded => |*t| {
-                try t.start(thread_count);
-                t.join();
-            },
-        }
+        var traverser: Traverser = try .init(gpa, dir);
+        defer traverser.deinit();
+        try traverser.start(thread_count);
+        traverser.join();
 
         const tr_print = tracy.traceNamed(@src(), "print results");
         defer tr_print.end();
-        const count = switch (traverser) {
-            .io_uring => |*t| t.output.items.len,
-            .threaded => |*t| t.output.len.load(.acquire),
-            .scheduled => |sched| sched.results.len,
-        };
+        const count = traverser.output.len.load(.acquire);
         std.log.debug("{} results", .{count});
         for (0..count) |id| {
-            const result: Result = switch (traverser) {
-                .io_uring => |*t| t.output.items[id],
-                .threaded => |*t| t.output.getPtr(id).?.load(),
-                .scheduled => |sched| sched.results[id],
-            };
+            const result: Result = traverser.output.getPtr(id).?.load();
 
             var suffix: []const u8 = "";
             switch (result.state.unpack()) {
@@ -89,15 +66,6 @@ pub fn main() !void {
     }
 }
 
-const Traverser = union(Options.Backend) {
-    io_uring: IoUringTraverser,
-    threaded: ThreadedTraverser,
-    scheduled: struct {
-        results: []Result,
-        arena: std.heap.ArenaAllocator,
-    },
-};
-
 fn parseArgs(gpa: std.mem.Allocator) !Options {
     var opts: Options = .{
         .arena = .init(gpa),
@@ -116,14 +84,6 @@ fn parseArgs(gpa: std.mem.Allocator) !Options {
         } else if (std.mem.eql(u8, flag, "-h") or std.mem.eql(u8, flag, "--help")) {
             std.fs.File.stdout().writeAll(help) catch {};
             std.process.exit(0);
-        } else if (std.mem.eql(u8, flag, "--backend")) {
-            const arg = args.next() orelse {
-                std.log.err("missing {s} argument", .{flag});
-                std.process.exit(1);
-            };
-            if (std.meta.stringToEnum(Options.Backend, arg)) |backend| {
-                opts.backend = backend;
-            }
         } else if (std.mem.eql(u8, flag, "-j") or std.mem.eql(u8, flag, "--threads")) {
             const arg = args.next() orelse {
                 std.log.err("missing {s} argument", .{flag});
@@ -149,11 +109,8 @@ fn parseArgs(gpa: std.mem.Allocator) !Options {
 
 const Options = struct {
     arena: std.heap.ArenaAllocator,
-    backend: Backend = .threaded,
     thread_count: ?usize = null,
     paths: []const []const u8 = &.{"."},
-
-    const Backend = enum { io_uring, threaded, scheduled };
 };
 
 const usage = "Usage: duz [options] [paths...]\n";
@@ -161,8 +118,7 @@ const help = usage ++
     \\
     \\Options:
     \\  -h, --help              Print this help message and exit
-    \\  --backend               Select backend to use ([threaded], io_uring, scheduled)
-    \\  -j <n>, --threads <n>   Number of threads to use for multithreaded backends
+    \\  -j <n>, --threads <n>   Number of threads to use
     \\
     \\
 ;
@@ -179,6 +135,4 @@ const root_allocator = struct {
 const std = @import("std");
 const tracy = @import("tracy");
 const Result = @import("Result.zig");
-const ThreadedTraverser = @import("Traverser.zig");
-const IoUringTraverser = @import("IoUringTraverser.zig");
-const ScheduledTraverser = @import("ScheduledTraverser.zig");
+const Traverser = @import("Traverser.zig");
